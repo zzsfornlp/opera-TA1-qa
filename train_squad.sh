@@ -1,6 +1,6 @@
 
 # --
-DATA_DIR=${SQUAD_DIR:-../data/}
+DATA_DIR=${DATA_DIR:-../data/}
 PY_OPTS=${PY_OPTS:-../run_squad.py}
 python ${PY_OPTS} \
     --model_type bert \
@@ -25,4 +25,4 @@ python ${PY_OPTS} \
 
 # --
 # CUDA_VISIBLE_DEVICES=0 bash ../train_squad.sh |& tee _log
-# CUDA_VISIBLE_DEVICES=0 SQUAD_DIR=?? PY_OPTS='-m pdb ../run_squad.py' bash ../train_squad.sh
+# CUDA_VISIBLE_DEVICES=0 DATA_DIR=?? PY_OPTS='-m pdb ../run_squad.py' bash ../train_squad.sh

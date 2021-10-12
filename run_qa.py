@@ -50,6 +50,9 @@ from transformers.data.metrics.squad_metrics import (
 )
 from transformers.data.processors.squad import SquadResult, SquadV1Processor, SquadV2Processor
 
+# --
+from qa_model import QaModel
+# --
 
 # try:
 #     from torch.utils.tensorboard import SummaryWriter
@@ -171,6 +174,12 @@ def train(args, train_dataset, model, tokenizer):
     # Added here for reproductibility
     set_seed(args)
 
+    # --
+    # record best results
+    overall_best_f1 = 0.
+    overall_best_step = -1
+    # --
+
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
@@ -236,6 +245,21 @@ def train(args, train_dataset, model, tokenizer):
                     if args.local_rank == -1 and args.evaluate_during_training:
                         results = evaluate(args, model, tokenizer)
                         logger.info(f"# --\nEval (@{global_step}) result = {results}")
+                        # --
+                        cur_f1 = results.get('f1', 0.)
+                        if cur_f1 > overall_best_f1:
+                            overall_best_f1 = cur_f1
+                            overall_best_step = global_step
+                            logger.info(f"!! Great, current F1 (@{global_step}) is the best: {overall_best_f1:.4f}")
+                            # also save best model
+                            logger.info(f"Saving best model checkpoint (@{global_step}) ...")
+                            model_to_save = model.module if hasattr(model, "module") else model
+                            model_to_save.save(args.qa_save_name + ".best")
+                            # --
+                        else:
+                            logger.info(f"!! Unfortunately, current F1 (@{global_step}) is not the best (@{overall_best_step:.4f}):"
+                                        f" {cur_f1:.4f} < {overall_best_f1:.4f}")
+                        # --
                     #     for key, value in results.items():
                     #         tb_writer.add_scalar("eval_{}".format(key), value, global_step)
                     # tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
@@ -244,18 +268,19 @@ def train(args, train_dataset, model, tokenizer):
 
                 # Save model checkpoint
                 if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
-                    output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
-                    # Take care of distributed/parallel training
-                    model_to_save = model.module if hasattr(model, "module") else model
-                    model_to_save.save_pretrained(output_dir)
-                    tokenizer.save_pretrained(output_dir)
-
-                    torch.save(args, os.path.join(output_dir, "training_args.bin"))
-                    logger.info("Saving model checkpoint to %s", output_dir)
-
-                    torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                    torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                    logger.info("Saving optimizer and scheduler states to %s", output_dir)
+                    pass  # not saving here!
+                    # output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
+                    # # Take care of distributed/parallel training
+                    # model_to_save = model.module if hasattr(model, "module") else model
+                    # model_to_save.save_pretrained(output_dir)
+                    # tokenizer.save_pretrained(output_dir)
+                    #
+                    # torch.save(args, os.path.join(output_dir, "training_args.bin"))
+                    # logger.info("Saving model checkpoint to %s", output_dir)
+                    #
+                    # torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                    # torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                    # logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
@@ -267,6 +292,7 @@ def train(args, train_dataset, model, tokenizer):
     # if args.local_rank in [-1, 0]:
     #     tb_writer.close()
 
+    logger.info(f"Finish training: F1={overall_best_f1:.4f}(@{overall_best_step})")
     return global_step, tr_loss / global_step
 
 
@@ -480,23 +506,23 @@ def main():
     # Required parameters
     parser.add_argument(
         "--model_type",
-        default=None,
+        default='bert',
         type=str,
-        required=True,
+        # required=True,
         help="Model type selected in the list: " + ", ".join(MODEL_TYPES),
     )
     parser.add_argument(
         "--model_name_or_path",
-        default=None,
+        default='',  # make it N/A
         type=str,
-        required=True,
+        # required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models",
     )
     parser.add_argument(
         "--output_dir",
-        default=None,
+        default='.',  # by default, at the same dir!
         type=str,
-        required=True,
+        # required=True,
         help="The output directory where the model checkpoints and predictions will be written.",
     )
 
@@ -662,7 +688,13 @@ def main():
     parser.add_argument("--server_port", type=str, default="", help="Can be used for distant debugging.")
 
     parser.add_argument("--threads", type=int, default=1, help="multiple threads for converting example to features")
+    # --
+    QaModel.add_args(parser)  # add more options
+    # --
     args = parser.parse_args()
+
+    if not args.model_name_or_path:
+        args.model_name_or_path = args.bert_model  # note: simply make it bert_model's name
 
     if args.doc_stride >= args.max_seq_length - args.max_query_length:
         logger.warning(
@@ -671,17 +703,17 @@ def main():
             "stride or increase the maximum length to ensure the features are correctly built."
         )
 
-    if (
-        os.path.exists(args.output_dir)
-        and os.listdir(args.output_dir)
-        and args.do_train
-        and not args.overwrite_output_dir
-    ):
-        raise ValueError(
-            "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(
-                args.output_dir
-            )
-        )
+    # if (
+    #     os.path.exists(args.output_dir)
+    #     and os.listdir(args.output_dir)
+    #     and args.do_train
+    #     and not args.overwrite_output_dir
+    # ):
+    #     raise ValueError(
+    #         "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(
+    #             args.output_dir
+    #         )
+    #     )
 
     # Setup distant debugging if needed
     if args.server_ip and args.server_port:
@@ -727,21 +759,26 @@ def main():
         torch.distributed.barrier()
 
     args.model_type = args.model_type.lower()
-    config = AutoConfig.from_pretrained(
-        args.config_name if args.config_name else args.model_name_or_path,
-        cache_dir=args.cache_dir if args.cache_dir else None,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
-        do_lower_case=args.do_lower_case,
-        cache_dir=args.cache_dir if args.cache_dir else None,
-    )
-    model = AutoModelForQuestionAnswering.from_pretrained(
-        args.model_name_or_path,
-        from_tf=bool(".ckpt" in args.model_name_or_path),
-        config=config,
-        cache_dir=args.cache_dir if args.cache_dir else None,
-    )
+    # config = AutoConfig.from_pretrained(
+    #     args.config_name if args.config_name else args.model_name_or_path,
+    #     cache_dir=args.cache_dir if args.cache_dir else None,
+    # )
+    # tokenizer = AutoTokenizer.from_pretrained(
+    #     args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
+    #     do_lower_case=args.do_lower_case,
+    #     cache_dir=args.cache_dir if args.cache_dir else None,
+    # )
+    # model = AutoModelForQuestionAnswering.from_pretrained(
+    #     args.model_name_or_path,
+    #     from_tf=bool(".ckpt" in args.model_name_or_path),
+    #     config=config,
+    #     cache_dir=args.cache_dir if args.cache_dir else None,
+    # )
+    # --
+    # simply do these inside 'create_model'
+    model = QaModel.create_model(args, args.qa_load_name0)  # try loading with name0
+    tokenizer = model.tokenizer
+    # --
 
     if args.local_rank == 0:
         # Make sure only the first process in distributed training will download model & vocab
@@ -770,51 +807,72 @@ def main():
 
     # Save the trained model and the tokenizer
     if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        logger.info("Saving model checkpoint to %s", args.output_dir)
-        # Save a trained model, configuration and tokenizer using `save_pretrained()`.
-        # They can then be reloaded using `from_pretrained()`
-        # Take care of distributed/parallel training
+        # logger.info("Saving model checkpoint to %s", args.output_dir)
+        # # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+        # # They can then be reloaded using `from_pretrained()`
+        # # Take care of distributed/parallel training
+        # model_to_save = model.module if hasattr(model, "module") else model
+        # model_to_save.save_pretrained(args.output_dir)
+        # tokenizer.save_pretrained(args.output_dir)
+        #
+        # # Good practice: save your training arguments together with the trained model
+        # torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
+        #
+        # # Load a trained model and vocabulary that you have fine-tuned
+        # model = AutoModelForQuestionAnswering.from_pretrained(args.output_dir)  # , force_download=True)
+        # tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        # model.to(args.device)
+        # --
+        logger.info("Saving model checkpoint (after training) ...")
         model_to_save = model.module if hasattr(model, "module") else model
-        model_to_save.save_pretrained(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
-
-        # Good practice: save your training arguments together with the trained model
-        torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
-
-        # Load a trained model and vocabulary that you have fine-tuned
-        model = AutoModelForQuestionAnswering.from_pretrained(args.output_dir)  # , force_download=True)
-        tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        model.to(args.device)
+        model_to_save.save(args.qa_save_name)
+        # --
 
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
-        if args.do_train:
-            logger.info("Loading checkpoints saved during training for evaluation")
-            checkpoints = [args.output_dir]
-            if args.eval_all_checkpoints:
-                checkpoints = list(
-                    os.path.dirname(c)
-                    for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True))
-                )
-                logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
+        # if args.do_train:
+        #     logger.info("Loading checkpoints saved during training for evaluation")
+        #     checkpoints = [args.output_dir]
+        #     if args.eval_all_checkpoints:
+        #         checkpoints = list(
+        #             os.path.dirname(c)
+        #             for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True))
+        #         )
+        #         logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
+        # else:
+        #     logger.info("Loading checkpoint %s for evaluation", args.model_name_or_path)
+        #     checkpoints = [args.model_name_or_path]
+        #
+        # logger.info("Evaluate the following checkpoints: %s", checkpoints)
+        #
+        # for checkpoint in checkpoints:
+        #     # Reload the model
+        #     global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
+        #     model = AutoModelForQuestionAnswering.from_pretrained(checkpoint)  # , force_download=True)
+        #     model.to(args.device)
+        #
+        #     # Evaluate
+        #     result = evaluate(args, model, tokenizer, prefix=global_step)
+        #
+        #     result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
+        #     results.update(result)
+        # --
+        # search for all possible model names
+        if args.do_train:  # if do training, then find save names!
+            checkpoints = [c[:-2] for c in sorted(glob.glob(args.qa_save_name + "*.m"))]
         else:
-            logger.info("Loading checkpoint %s for evaluation", args.model_name_or_path)
-            checkpoints = [args.model_name_or_path]
-
+            checkpoints = [args.qa_load_name]
         logger.info("Evaluate the following checkpoints: %s", checkpoints)
-
-        for checkpoint in checkpoints:
-            # Reload the model
-            global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
-            model = AutoModelForQuestionAnswering.from_pretrained(checkpoint)  # , force_download=True)
+        for ii, checkpoint in enumerate(checkpoints):
+            model = QaModel.load_model(checkpoint)
             model.to(args.device)
-
             # Evaluate
-            result = evaluate(args, model, tokenizer, prefix=global_step)
-
-            result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
+            ckp_name = f'C{ii}'  # note: maybe a better name?
+            result = evaluate(args, model, tokenizer, prefix=ckp_name)
+            result = dict((k + f'_{ckp_name}', v) for k, v in result.items())
             results.update(result)
+        # --
 
     logger.info("Results: {}".format(results))
 
