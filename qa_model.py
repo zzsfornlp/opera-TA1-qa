@@ -63,9 +63,16 @@ class QaModel(nn.Module):
         return model
 
     @staticmethod
-    def load_model(load_name: str):
+    def load_model(load_name: str, extra_args=None):
         # first load args
         args = torch.load(load_name+".args")
+        if extra_args is not None:
+            if not isinstance(extra_args, dict):
+                extra_args = extra_args.__dict__
+            for k, v in extra_args.items():
+                if hasattr(args, k):
+                    setattr(args, k, v)
+                    logging.info(f"Change loaded args: {k} -> {v}")
         # then create model (and load inside)
         args.qa_load_name = load_name
         model = QaModel.create_model(args, args.qa_load_name)
@@ -157,7 +164,7 @@ class QaModel(nn.Module):
                 loss0 = loss_binary(logits, _trg_t, args.qa_label_ls)  # [bs, slen]
                 weight0 = torch.where(_trg_t<=0., _neg_dw, torch.ones_like(loss0))  # [bs, slen]
                 weight0 *= attention_mask  # mask out invalid ones
-                total_loss = (loss0 * weight0).sum() / attention_mask.sum()  # [], note: here no discount for denom
+                total_loss = (loss0 * weight0).sum() / weight0.sum()  # []
                 ret = {'total_loss': total_loss, 'start_logits': None, 'end_logits': None, 'logits': logits}
             else:
                 logits[attention_mask<=0.] = _NEG  # mask out invalid ones!
