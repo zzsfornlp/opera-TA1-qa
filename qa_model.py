@@ -8,7 +8,6 @@ from torch.nn import functional as F
 from torch.nn import CrossEntropyLoss
 import logging
 from transformers import AutoTokenizer, AutoModel, AutoConfig
-from transformers import BertModel, RobertaModel, XLMRobertaModel
 
 # --
 class QaModel(nn.Module):
@@ -69,15 +68,12 @@ class QaModel(nn.Module):
         logging.info(f"Loading pre-trained bert model for ZBert of {bert_name} from {bert_cache}")
         # --
         tokenizer = AutoTokenizer.from_pretrained(bert_name, cache_dir=bert_cache)
-        mtype = {"bert": BertModel, "roberta": RobertaModel, "xlm": XLMRobertaModel}[
-            bert_name.split("/")[-1].split("-")[0]]
         if args.qa_load_name:  # if we later want to load model
-            from transformers import AutoConfig
             bert_config = AutoConfig.from_pretrained(bert_name)
-            model = mtype(bert_config)
+            model = AutoModel.from_config(bert_config)
             logging.info("No pretrain-loading for bert, really want this?")
         else:
-            model = mtype.from_pretrained(bert_name, cache_dir=bert_cache)
+            model = AutoModel.from_pretrained(bert_name, cache_dir=bert_cache)
         # --
         if hasattr(model, "pooler"):  # note: delete unused part!
             model.__delattr__("pooler")
