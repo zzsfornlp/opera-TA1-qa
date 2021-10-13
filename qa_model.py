@@ -70,9 +70,9 @@ class QaModel(nn.Module):
             if not isinstance(extra_args, dict):
                 extra_args = extra_args.__dict__
             for k, v in extra_args.items():
-                if hasattr(args, k):
-                    setattr(args, k, v)
-                    logging.info(f"Change loaded args: {k} -> {v}")
+                # if hasattr(args, k):
+                setattr(args, k, v)
+                logging.info(f"Change loaded args: {k} -> {v}")
         # then create model (and load inside)
         args.qa_load_name = load_name
         model = QaModel.create_model(args, args.qa_load_name)
@@ -88,6 +88,7 @@ class QaModel(nn.Module):
         parser.add_argument("--qa_head_type", default='label', type=str, choices=['label', 'ptr'])
         parser.add_argument("--qa_label_ls", default=0., type=float)  # label-smoothing
         parser.add_argument("--qa_label_negratio", default=5., type=float)  # neg ratio to positive
+        parser.add_argument("--qa_label_pthr", default=0., type=float)  # predicting threshold, >=this?keep:_NEG
         # --
         parser.add_argument("--qa_load_name0", default=None, type=str)  # loading name (mainly for training)
         parser.add_argument("--qa_load_name", default=None, type=str)  # loading name (mainly for testing)
@@ -169,8 +170,11 @@ class QaModel(nn.Module):
             else:
                 logits[attention_mask<=0.] = _NEG  # mask out invalid ones!
                 # --
-                log_prob1 = F.logsigmoid(logits)  # [bs, slen]
-                log_prob0 = F.logsigmoid(-logits)  # [bs, slen]
+                t_logits = logits.clone()  # [bs, slen]
+                t_logits[t_logits < args.qa_label_pthr] = _NEG  # simply cut them off!
+                # --
+                log_prob1 = F.logsigmoid(t_logits)  # [bs, slen]
+                log_prob0 = F.logsigmoid(-t_logits)  # [bs, slen]
                 # note: prob of NULL is the min(log_prob0): if the min-log_prob0 is large, then high chance no-ans
                 # -- here '*2' means that for other logits we are adding two things
                 start_null = end_null = (log_prob0 * attention_mask).min(-1)[0].unsqueeze(-1) * 2  # [bs, 1]

@@ -689,6 +689,7 @@ def main():
 
     parser.add_argument("--threads", type=int, default=1, help="multiple threads for converting example to features")
     # --
+    parser.add_argument('--qa_load_kwargs', type=str, default='{}')  # extra model setting when loading!
     QaModel.add_args(parser)  # add more options
     # --
     args = parser.parse_args()
@@ -865,7 +866,7 @@ def main():
             checkpoints = [args.qa_load_name]
         logger.info("Evaluate the following checkpoints: %s", checkpoints)
         for ii, checkpoint in enumerate(checkpoints):
-            model = QaModel.load_model(checkpoint)
+            model = QaModel.load_model(checkpoint, eval(args.qa_load_kwargs))
             model.to(args.device)
             # Evaluate
             ckp_name = f'C{ii}'  # note: maybe a better name?
