@@ -2,7 +2,7 @@
 
 # --
 # Using original 'run_squad.py'
-Use scripts/train_squad.sh to train on squad v2.0.
+Use train_squad.sh to train on squad v2.0.
 - `data_dir`: input data dir as well as cache dir (let it be as the default as '.')
 - The processing of `SquadExample` seems not quite careful (tokenized by spaces), but currently let it be ...
 - Then with `squad_convert_example_to_features`, `SquadExample` is converted to `SquadFeatures`
@@ -14,3 +14,4 @@ CUDA_VISIBLE_DEVICES=0 python -m pdb run_squad.py --model_type bert --version_2_
 
 # --
 # Using modified 'run_qa.py'
+Use train_qa.sh to train it, we can have the models of 'ptr' (pointer) or 'label' (labeling).
