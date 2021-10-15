@@ -33,7 +33,9 @@ _global_log = "_stdout.log"
 
 def run_cmd(cmd: str):
     print(f"Run {cmd}")
-    return os.system(cmd)
+    # return os.system(cmd)
+    ret = subprocess.run(cmd, shell=True)
+    return ret
 
 def run_one(arg_str: str):
     # --
@@ -59,7 +61,15 @@ def run_one(arg_str: str):
     print(f"Start task {cur_idx}: {arg_str}")
     # --
     _log_suffix = '_'.join(''.join(arg_str.split("--")).split())
-    run_cmd(f"CUDA_VISIBLE_DEVICES={gpu_id} EXTRA_ARGS='{arg_str} --qa_save_name zmodel{cur_idx}' bash ../train_qa.sh 2>&1 | tee _log{cur_idx}.{_log_suffix}")
+    # run_cmd(f"CUDA_VISIBLE_DEVICES={gpu_id} EXTRA_ARGS='{arg_str} --qa_save_name zmodel{cur_idx}' bash ../train_qa.sh 2>&1 | tee _log{cur_idx}.{_log_suffix}")
+    run_cmd(f"""{{
+        CUDA_VISIBLE_DEVICES={gpu_id} EXTRA_ARGS='{arg_str} --qa_save_name zmodel{cur_idx}' bash ../train_qa.sh;
+        for tt in 0. 1. 2. 3. 4.; do
+            echo "Decode pthr={{tt}}"
+            CUDA_VISIBLE_DEVICES={gpu_id} python3 ../qa_main.py --mode squad --input_path ../data/dev-v2.0.json --output_path '' --model tune1013/zmodel{cur_idx}.best --model_kwargs "{{'qa_label_pthr':${{tt}}}}"
+        done
+    }} 2>&1 | tee _log{cur_idx}.{_log_suffix}
+    """)
     # --
     with _global_lock:
         _rs = list(Global.gpu_available)
@@ -100,9 +110,17 @@ def main():
         [f"--learning_rate {z}" for z in [1e-5, 3e-5, 5e-5]],
         [f"--qa_label_negratio {z}" for z in [5, 10]],
     ]
+    # 0: best=4.: 73.014/77.151;; 1: best=3.: 74.159/78.062
+    # 2: best=3.: 75.760/79.639;; 3: best=3.: 76.299/79.989 [best]
+    # 4: best=3.: 75.086/78.808;; 5: best=3.: 75.254/79.302
     # --
-    tr = tune_ranges1013
-    run_them(tr, [1,2,3])
+    tune_ranges1015 = [
+        [f"--qa_label_negratio {z}" for z in [10, 20]],
+        [f"--qa_label_ls {z}" for z in [0., 0.05]],
+    ]
+    # --
+    tr = tune_ranges1015
+    run_them(tr, [1,3])
 
 if __name__ == '__main__':
     main()

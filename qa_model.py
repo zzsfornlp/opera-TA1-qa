@@ -206,3 +206,50 @@ class QaModel(nn.Module):
         else:
             return (() if ret['total_loss'] is None else (ret['total_loss'], )) + (ret['start_logits'], ret['end_logits'])
         # --
+
+    # decode one instance
+    def decode(self, inst, arr_logits):
+        t_logits = torch.tensor(arr_logits[:len(inst)])  # [len, ??], just on cpu is fine!
+        # --
+        args = self.args
+        if args.qa_head_type == 'label':
+            pthr = args.qa_label_pthr
+            # get all valid spans
+            _ctx_offset = inst.context_offset
+            t_logits = t_logits.squeeze(-1)  # [len]
+            t_probs = F.sigmoid(t_logits).tolist()  # [len]
+            # --
+            _hit = (t_logits>pthr).tolist()
+            valid_spans = []  # [left, right, sum(prob)]
+            last_hit = False
+            for ii, vv in enumerate(_hit[_ctx_offset:], _ctx_offset):
+                if vv:
+                    if not last_hit:
+                        valid_spans.append([ii, ii, t_probs[ii]])
+                    else:  # add it
+                        valid_spans[-1][1] = ii
+                        valid_spans[-1][-1] += t_probs[ii]
+                    last_hit = True
+                else:
+                    last_hit = False
+            # --
+            # get the best one!
+            if len(valid_spans) == 0:
+                return (0, 0)
+            else:
+                sorted_spans = sorted(valid_spans, key=(lambda x: x[-1]/(x[1]-x[0]+1)), reverse=True)
+                best_one = sorted_spans[0]
+                return (best_one[0], best_one[1])
+            # --
+        elif args.qa_head_type == 'ptr':
+            _NEG = -1000.
+            _ctx_offset = inst.context_offset
+            t_logits[1:_ctx_offset] = _NEG  # mask out bad ones
+            t_probs = t_logits.softmax(0)  # [len, 2]
+            best_left_prob, best_left_idx = [z.item() for z in t_probs[:,0].max(0)]
+            t_probs[:best_left_idx, 1] = _NEG
+            best_right_prob, best_right_idx = [z.item() for z in t_probs[:,1].max(0)]
+            return (best_left_idx, best_right_idx)
+        else:
+            raise NotImplementedError()
+        # --

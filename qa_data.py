@@ -74,14 +74,20 @@ class GlobalResources:
         self.g_subtoker: SubToker = None
         self.args_max_seq_length = 384  # maximum full length to the model
         self.args_max_query_length = 64  # maximum length for the query
+        self.device = None
 
     @property
     def sub_tokenizer(self):
         return self.g_subtoker.tokenizer
 # --
+# note: for simplicity, just make it global ...
 GR = GlobalResources()
-def set_gr(tokenizer):
+def set_gr(tokenizer, gpuid):
     GR.g_subtoker = SubToker(tokenizer)
+    if gpuid >= 0:
+        GR.device = torch.device(gpuid)
+    else:
+        GR.device = torch.device('cpu')
 # --
 
 # --
@@ -98,6 +104,25 @@ class TextPiece:
         self.subtoken_ids = GR.sub_tokenizer.convert_tokens_to_ids(self.subtokens)
         # --
 
+class TextSpan:
+    def __init__(self, text_piece: TextPiece, start: int, end: int):
+        self.text_piece = text_piece
+        self.start = start
+        self.end = end
+
+    @staticmethod
+    def create_from_subspan(text_piece: TextPiece, sub_start: int, sub_end: int):
+        tok_start, tok_end = text_piece.sub2tid[sub_start], text_piece.sub2tid[sub_end-1] + 1
+        return TextSpan(text_piece, tok_start, tok_end)
+
+    def get_orig_str(self):
+        if self.start >= self.end:
+            return ""
+        else:
+            span_left = self.text_piece.token_spans[self.start]
+            span_right = self.text_piece.token_spans[self.end-1]
+            return self.text_piece.orig_text[span_left[0]:span_right[1]]
+
 # --
 # actual qa instances
 
@@ -106,12 +131,21 @@ class QaInstance:
     def __init__(self, context: TextPiece, question: TextPiece, qid: str):
         self.qid = qid
         # construct the inputs
+        self.context = context
+        self.question = question
         self.input_ids, self.type_ids, self.context_offset = QaInstance.construct_qc_pair(context, question)
         # --
 
-    # extract answer from subtok idxes
-    def extract_answer(self, start: int, end: int):
-        raise NotImplementedError()
+    def __len__(self):
+        return len(self.input_ids)  # full length
+
+    # norm answer from subtok idxes to token span
+    def get_answer_span(self, p_left: int, p_right: int):
+        if p_left == 0 and p_right == 0:  # no answer
+            return TextSpan(self.context, 0, 0)
+        else:
+            c_left, c_right = max(0, p_left-self.context_offset), max(0, p_right-self.context_offset)
+            return TextSpan.create_from_subspan(self.context, c_left, c_right+1)
 
     @staticmethod
     def construct_qc_pair(context: TextPiece, question: TextPiece):
@@ -120,7 +154,7 @@ class QaInstance:
         input_ids, type_ids = [_sub_tokenizer.cls_token_id], [0]
         # add question
         if len(question.subtoken_ids) > _limit_q:
-            logging.warning(f"Truncate question ({len(question.subtoken_ids)} > {_limit_q}): {question.orig_text}")
+            logging.warning(f"Truncate question ({len(question.subtoken_ids)} > {_limit_q}): {question.orig_text[:80]} ...")
         q_ids = question.subtoken_ids[:_limit_q]
         input_ids.extend(q_ids + [_sub_tokenizer.sep_token_id])
         type_ids.extend([0] * (len(q_ids) + 1))
@@ -128,7 +162,7 @@ class QaInstance:
         # add context
         budget = _limit_full - 1 - len(input_ids)
         if len(context.subtoken_ids) > budget:
-            logging.warning(f"Truncate context ({len(context.subtoken_ids)} > {budget}): {context.orig_text}")
+            logging.warning(f"Truncate context ({len(context.subtoken_ids)} > {budget}): {context.orig_text[:80]} ...")
         c_ids = context.subtoken_ids[:budget]
         input_ids.extend(c_ids + [_sub_tokenizer.sep_token_id])
         type_ids.extend([1] * (len(c_ids) + 1))
@@ -136,15 +170,18 @@ class QaInstance:
 
     @staticmethod
     def batch_insts(insts, device=None):
+        # --
+        if device is None:
+            device = GR.device
+        # --
         _shape = [len(insts), max(len(z.input_ids) for z in insts)]  # [bs, max-len]
         input_ids, attention_mask, token_type_ids = \
-            torch.full(_shape, GR.sub_tokenizer.pad_token_id).long(), torch.zeros(_shape).float, torch.zeros(_shape).long()
+            torch.zeros(_shape).long()+GR.sub_tokenizer.pad_token_id, torch.zeros(_shape).float(), torch.zeros(_shape).long()
         for bidx, inst in enumerate(insts):
             _len = len(inst.input_ids)
-            input_ids[bidx, :_len] = inst.input_ids
+            input_ids[bidx, :_len] = torch.tensor(inst.input_ids)
             attention_mask[bidx, :_len] = 1.
-            token_type_ids[bidx, :_len] = inst.type_ids
+            token_type_ids[bidx, :_len] = torch.tensor(inst.type_ids)
         # --
-        if device is not None:
-            input_ids, attention_mask, token_type_ids = [z.to(device) for z in [input_ids, attention_mask, token_type_ids]]
+        input_ids, attention_mask, token_type_ids = [z.to(device) for z in [input_ids, attention_mask, token_type_ids]]
         return input_ids, attention_mask, token_type_ids
