@@ -108,6 +108,9 @@ def run_them(ranges: list, gpu_ids: list, shuffle=False):
 # --
 def main():
     # --
+    # try1:
+    # best=3: 75.760/79.639 -> [currently just use this since it can produce more ...]
+    # --
     tune_ranges1013 = [
         [f"--learning_rate {z}" for z in [1e-5, 3e-5, 5e-5]],
         [f"--qa_label_negratio {z}" for z in [5, 10]],

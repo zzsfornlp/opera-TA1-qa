@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument('--csr_query_topic', type=int, default=1)  # query all subtopics under topic?
     parser.add_argument('--csr_ctx_size', type=int, default=8)  # number of sent per chunk?
     parser.add_argument('--csr_ctx_stride', type=int, default=4)  # number of sent between chunks?
-    parser.add_argument('--csr_prob_thresh', type=float, default=0.25)  # >this to be valid!
+    parser.add_argument('--csr_prob_thresh', type=float, default=0.5)  # >this to be valid!
     parser.add_argument('--csr_cf_sratio', type=float, default=0.5)  # max number (ratio*sent_num) per doc
     parser.add_argument('--csr_cf_per_sent', type=int, default=1)  # max number of cf per sent
     # --
@@ -154,9 +154,9 @@ def decode_csr(args, model):
     # --
 
 def candidate_sort_key(cand):
-    s0 = 0 if 'event' in cand['@type'] else 1  # prefer event over entity
+    # s0 = 0 if 'event' in cand['@type'] else 1  # prefer event over entity [nope!]
     s1 = - np.average(cand['qa_scores']).item()
-    return (s0, s1)
+    return s1  # only rank by score!
 
 def decode_one_csr(doc, all_subtopics, args, model):
     cc = defaultdict(int)
@@ -197,11 +197,12 @@ def decode_one_csr(doc, all_subtopics, args, model):
                 for _sent in doc.sents[s_start:s_end]:
                     _t_probs = np.zeros(len(_sent.tokens))  # current probs
                     for _tid in _sent.sub2tid:
-                        _t_probs[_tid] = max(_t_probs[_tid], _probs[_cur_soff])  # note: maximum for subtok->tok
+                        if _cur_soff < len(_probs):  # otherwise, things are truncated and just ignore those!
+                            _t_probs[_tid] = max(_t_probs[_tid], _probs[_cur_soff])  # note: maximum for subtok->tok
                         _cur_soff += 1
                     canvas[_sent.info['id']][0] += 1
                     canvas[_sent.info['id']][1] += _t_probs
-                if _inst.input_ids[_cur_soff] != GR.sub_tokenizer.sep_token_id:
+                if _cur_soff < len(_inst.input_ids) and _inst.input_ids[_cur_soff] != GR.sub_tokenizer.sep_token_id:
                     logging.warning("Probably internal error!!")
         # finalize token scores
         token_scores = {s: (v[1]/v[0]) for s,v in canvas.items()}
@@ -221,7 +222,22 @@ def decode_one_csr(doc, all_subtopics, args, model):
                         _cands.append(_item)
             # then prune by sent
             cc['cand_init'] += len(_cands)
-            sent_cands = sorted(_cands, key=candidate_sort_key)[:args.csr_cf_per_sent]
+            _cands_sorted = sorted(_cands, key=candidate_sort_key)
+            # --
+            sent_cands = []
+            for _one_cand in _cands_sorted:  # go through to check no-overlap!
+                if len(sent_cands) >= args.csr_cf_per_sent:
+                    break
+                _overlap = False
+                _start1, _length1 = doc.get_provenance_span(_one_cand, False, False)  # get full span!
+                for _cand2 in sent_cands:
+                    _start2, _length2 = doc.get_provenance_span(_cand2, False, False)  # get full span!
+                    if (_start2>=_start1 and _start2<(_start1+_length1)) or (_start1>=_start2 and _start1<(_start2+_length2)):
+                        _overlap = True
+                        break
+                if not _overlap:
+                    sent_cands.append(_one_cand)
+            # --
             doc_cands.extend(sent_cands)
         cc['cand_sent'] += len(doc_cands)
         final_cands = sorted(doc_cands, key=candidate_sort_key)[:int(np.ceil(args.csr_cf_sratio * len(doc.sents)))]

@@ -2,7 +2,7 @@
 
 import os
 from typing import List
-from collections import defaultdict
+from collections import defaultdict, Counter
 import string
 import logging
 import torch
@@ -268,6 +268,7 @@ class CsrDoc:
         self.claim_events = defaultdict(list)  # sid -> claim events
         self.cand_events = defaultdict(list)  # sid -> other candidate events
         self.cand_entities = defaultdict(list)  # sid -> candidate entities
+        failed_spans = Counter()
         for ff in json_doc['frames']:
             if ff['@type'] in ['entity_evidence', 'event_evidence']:
                 _provenance = ff['provenance']
@@ -276,7 +277,8 @@ class CsrDoc:
                 if _char_posi is not None:
                     _tok_posi = _id2sent[_provenance['parent_scope']].cspan2tspan(*_char_posi)
                 if _tok_posi is None:
-                    logging.warning(f"Cannot find head tok_posi for frame: {ff['@id']} {_provenance}")
+                    # logging.warning(f"Cannot find head tok_posi for frame: {ff['@id']} {_provenance}")
+                    failed_spans[ff['@type']] += 1
                     continue
                 ff['tok_posi'] = _tok_posi  # token-span inside sentence!
                 # --
@@ -288,6 +290,8 @@ class CsrDoc:
                     else:
                         self.cand_events[_provenance['parent_scope']].append(ff)
                 # --
+        if len(failed_spans) > 0:
+            logging.warning(f"Cannot find head tok_posi for {self.doc_id}: {failed_spans}")
         # --
         # remember these
         self.id2frame = _id2frame
