@@ -217,7 +217,7 @@ class QaModel(nn.Module):
             # get all valid spans
             _ctx_offset = inst.context_offset
             t_logits = t_logits.squeeze(-1)  # [len]
-            t_probs = F.sigmoid(t_logits).tolist()  # [len]
+            t_probs = t_logits.sigmoid().tolist()  # [len]
             # --
             _hit = (t_logits>pthr).tolist()
             valid_spans = []  # [left, right, sum(prob)]
