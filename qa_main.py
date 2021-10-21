@@ -17,7 +17,7 @@ from qa_eval import main_eval
 def parse_args():
     parser = argparse.ArgumentParser('Main Decoding')
     # input & output
-    parser.add_argument('--mode', type=str, default='csr', choices=['squad', 'csr'])
+    parser.add_argument('--mode', type=str, default='csr', choices=['squad', 'csr', 'demo'])
     parser.add_argument('--input_path', type=str, required=True)
     parser.add_argument('--output_path', type=str, required=True)
     parser.add_argument('--model', type=str, required=True)
@@ -97,6 +97,35 @@ def decode_squad(args, model):
     eval_res = main_eval(dataset, all_preds)
     logging.info(f"Eval results: {eval_res}")
     return all_preds
+
+def decode_demo(args, model):
+    # --
+    # coloring
+    BLUE = "\033[0;34m"
+    END = "\033[0m"
+    # --
+    # read from inputs
+    ii = 0
+    while True:
+        str_question = input("Input a question: >> ").strip()
+        str_context = input("Input a context: >> ").strip()
+        if str_question == '' and str_context == '':
+            break
+        t_question, t_context = TextPiece(str_question), TextPiece(str_context)
+        inst = QaInstance(t_context, t_question, '')
+        cur_probs = batched_forward(args, model, [inst], apply_labeling_prob=True)[0]
+        printings = []
+        hit_count = 0
+        for subtok, prob in zip(t_context.subtokens, cur_probs[inst.context_offset:]):
+            printings.append(f"{subtok}[{prob:.3f}]")
+            if prob > args.csr_prob_thresh:
+                printings[-1] = BLUE + printings[-1] + END
+                hit_count += 1
+        logging.info(f"Results have hit count of {hit_count}:")
+        logging.info(f"=> {' '.join(printings)}")
+        ii += 1
+    # --
+    logging.info("Finished!")
 
 # =====
 # csr related
@@ -282,6 +311,8 @@ def main():
             decode_csr(args, model)
         elif args.mode == 'squad':
             decode_squad(args, model)
+        elif args.mode == 'demo':
+            decode_demo(args, model)
         else:
             raise NotImplementedError()
     # --
@@ -291,5 +322,6 @@ if __name__ == '__main__':
 
 # --
 # decode csr
-# python3 qa_main.py --input_pct ?? --input_topic ?? --input_path csr_in --output_path csr_out --model try1/zmodel.best
+# python3 qa_main.py --model zmodel.best --input_pct ?? --input_topic ?? --input_path csr_in --output_path csr_out
 # python3 qa_main.sh csr_in csr_out ?? ??
+# python3 qa_main.py --model zmodel.best --mode demo --input_path '' --output_path ''
