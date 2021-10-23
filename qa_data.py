@@ -9,12 +9,41 @@ import torch
 import json
 import copy
 from nltk.tokenize import TreebankWordTokenizer, WordPunctTokenizer, PunktSentenceTokenizer
+import re
+
+# --
+# todo(note): likely to be nltk's bug
+class ModifiedTreebankWordTokenizer(TreebankWordTokenizer):
+    def span_tokenize(self, sentence):
+        raw_tokens = self.tokenize(sentence)
+        # convert
+        if ('"' in sentence) or ("''" in sentence):
+            # Find double quotes and converted quotes
+            matched = [m.group() for m in re.finditer(r"``|'{2}|\"", sentence)]
+            # Replace converted quotes back to double quotes
+            tokens = [matched.pop(0) if tok in ['"', "``", "''"] else tok for tok in raw_tokens]
+        else:
+            tokens = raw_tokens
+        # align_tokens
+        point = 0
+        offsets = []
+        for token in tokens:
+            try:
+                start = sentence.index(token, point)
+            except ValueError as e:
+                # raise ValueError(f'substring "{token}" not found in "{sentence}"') from e
+                logging.warning(f"Tokenizer skip unfound token: {token} ||| {sentence[point:]}")
+                continue  # note: simply skip this one!!
+            point = start + len(token)
+            offsets.append((start, point))
+        return offsets
+# --
 
 # --
 # word tokenizer
 class NTokenizer:
     def __init__(self):
-        self.word_toker = TreebankWordTokenizer()
+        self.word_toker = ModifiedTreebankWordTokenizer()
         self.sent_toker = PunktSentenceTokenizer()
         # --
 
