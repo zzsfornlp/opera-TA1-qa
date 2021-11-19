@@ -5,13 +5,31 @@
 from typing import List
 import sys
 import string
-from msp2.data.inst import Sent, MyPrettyPrinter, QuestionAnalyzer
-from msp2.utils import zlog, zopen, zwarn, Conf, default_json_serializer
-from msp2.tools.annotate import AnnotatorStanzaConf, AnnotatorStanza
+import logging
+import json
+import stanza
 from nltk.tokenize import TreebankWordTokenizer
 
+class StanzaParser:
+    def __init__(self, stanza_dir: str):
+        common_kwargs = {"lang": 'en', "use_gpu": False, 'dir': stanza_dir}
+        self.parser = stanza.Pipeline(
+            processors='tokenize,pos,lemma,depparse', tokenize_pretokenized=True, **common_kwargs)
+
+    def parse(self, tokens: List[str]):
+        res = self.parser([tokens])
+        words = res.sentences[0].words
+        if len(words) != len(tokens):
+            logging.warning(f"Sent length mismatch: {len(words)} vs {len(tokens)}")
+        ret = {
+            'text': [w.text for w in words],
+            'lemma': [w.lemma for w in words], 'upos': [w.upos for w in words],
+            'head': [w.head for w in words], 'deprel': [w.deprel for w in words],
+        }
+        return ret
+
 def read_tab_file(file: str):
-    with zopen(file) as fd:
+    with open(file) as fd:
         headline = fd.readline()
         head_fields = [z.lower() for z in headline.rstrip().split("\t")]
         ret = []
@@ -24,10 +42,7 @@ def read_tab_file(file: str):
 class TemplateParser:
     def __init__(self, stanza_dir: str):
         self.word_toker = TreebankWordTokenizer()
-        stanza_conf = AnnotatorStanzaConf.direct_conf(
-            stanza_lang='en', stanza_dir=stanza_dir, stanza_processors='tokenize,pos,lemma,depparse'.split(','),
-            stanza_use_gpu=False, stanza_input_mode='tokenized')
-        self.stanza = AnnotatorStanza(stanza_conf)
+        self.parser = StanzaParser(stanza_dir)
 
     def parse_template(self, template: str, hint: str = None, quite=False):
         # step 1: normalize text
@@ -43,7 +58,7 @@ class TemplateParser:
                     _toks = [tok[:-2].split("/")[0], 'X']
                 # --
                 if x_widx is not None:
-                    zwarn(f"Hit multiple Xs, ignore the later one: {raw_tokens}")
+                    logging.warning(f"Hit multiple Xs, ignore the later one: {raw_tokens}")
                 else:
                     x_widx = len(normed_tokens) + len(_toks) - 1
                     if tok.lower().endswith("-x"):
@@ -56,8 +71,7 @@ class TemplateParser:
         # step 2: parse it!
         if normed_tokens[-1] != '.':  # add last dot if there are not
             normed_tokens = normed_tokens + ["."]
-        sent = Sent.create(normed_tokens)
-        self.stanza.annotate([sent])  # parse this one!
+        sent = self.parser.parse(normed_tokens)  # parse this one!
         # step 3: template to question
         q_toks = ['what']
         if hint is not None:
@@ -75,20 +89,37 @@ class TemplateParser:
                 final_tokens = ["When"] + question_tokens[3:]
         # --
         if not quite:
-            zlog(f"#-- Parse template: {template} ||| {hint}\n"
+            logging.info(f"#-- Parse template: {template} ||| {hint}\n"
                  f"=>raw={raw_tokens}\n=>norm={normed_tokens}\n=>q={question_tokens}\n=>ret={final_tokens}")
         # if debug:
         #     breakpoint()
         return sent, final_tokens
 
-    def template2question(self, tsent: Sent, q_widx: int, q_toks: List[str]):
-        # note: directly use dep-tree, which seems easier ...
-        tree = tsent.tree_dep
-        sent_toks = list(tsent.seq_word.vals)  # copy it
+    def get_chs_lists(self, cur_heads):
+        chs = [[] for _ in range(len(cur_heads) + 1)]
+        for m, h in enumerate(cur_heads):  # note: already sorted in left-to-right
+            chs[h].append(m)  # note: key is hidx, value is midx
+        return chs
+
+    def get_ranges(self, cur_heads):
+        ranges = [[z, z] for z in range(len(cur_heads))]
+        for m in range(len(cur_heads)):
+            cur_idx = m
+            while cur_idx >= 0:
+                ranges[cur_idx][0] = min(m, ranges[cur_idx][0])
+                ranges[cur_idx][1] = max(m, ranges[cur_idx][1])
+                cur_idx = cur_heads[cur_idx] - 1  # offset -1
+        return ranges
+
+    def template2question(self, sent, q_widx: int, q_toks: List[str]):
+        sent_toks = list(sent['text'])  # copy it to modify!
         if not str.isupper(sent_toks[0][:2]):  # probably not PROPN
             sent_toks[0] = sent_toks[0][0].lower() + sent_toks[0][1:]  # todo(+N): lowercase anyway ...
-        dep_labels = [z.split(":")[0] for z in tree.seq_label.vals]
-        dep_chs_lists = tree.chs_lists
+        dep_labels = [z.split(":")[0] for z in sent['deprel']]
+        dep_heads = sent['head']
+        dep_chs_lists = self.get_chs_lists(dep_heads)  # [1+m]: list of chidren
+        dep_ranges = self.get_ranges(dep_heads)  # [m]: left&right span boundary
+        sent_upos, sent_lemma = sent['upos'], sent['lemma']
         # --
         # note: some (4 in prac) may suffer from parsing errors (center verb not detected), but can be fixed simply:
         if q_widx == 0:  # X ... -> W?? ...
@@ -105,7 +136,7 @@ class TemplateParser:
             q0_put = False
             orig_q_widx = q_widx
             if dep_labels[q_widx] == 'compound':  # up one layer!
-                q_widx = tree.seq_head.vals[q_widx]-1
+                q_widx = dep_heads[q_widx]-1
             for q0_ch in sorted(dep_chs_lists[1+q_widx] + [q_widx]):
                 if q0_ch == orig_q_widx:
                     continue  # ignore X
@@ -124,7 +155,7 @@ class TemplateParser:
                         if not q0_put:
                             q0_toks.extend(q_toks)
                             q0_put = True
-                    _range = tree.ranges[q0_ch]
+                    _range = dep_ranges[q0_ch]
                     q0_toks.extend(sent_toks[_range[0]:_range[1]+1])
             if not q0_put:
                 q0_toks.extend(q_toks)
@@ -156,8 +187,8 @@ class TemplateParser:
                         ac_i0 = auxcop_idxes[0]
                         root_ch_toks[subj_i0] = root_ch_toks[ac_i0] + root_ch_toks[subj_i0]
                         root_ch_toks[ac_i0] = []
-                    elif tsent.seq_upos.vals[root_widx] == 'VERB' and tsent.seq_lemma.vals[root_widx] is not None:
-                        root_lemma, root_word = tsent.seq_lemma.vals[root_widx], sent_toks[root_widx]
+                    elif sent_upos[root_widx] == 'VERB' and sent_lemma[root_widx] is not None:
+                        root_lemma, root_word = sent_lemma[root_widx], sent_toks[root_widx]
                         if root_word == root_lemma:
                             _extra = 'do'
                         elif root_word == root_lemma + 's' or root_word == root_lemma + 'es' \
@@ -225,43 +256,31 @@ def postprocess_question(q_toks):
     return " ".join(ts)
 
 def main(input_file='', output_file='', stanza_dir=''):
+    # --
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO)
+    # --
     parser = TemplateParser(stanza_dir)
-    if input_file == '':
-        while True:
-            in_line = input(">> ")
-            in_line = in_line.strip()
-            if len(in_line) == 0:
-                break
-            template, subtopic = (in_line.split("|||") + [''])[:2]
-            if 'X' in template:
-                sent, res_toks = parser.parse_template(template, hint=subtopic)
-            else:
-                tokens = parser.word_toker.tokenize(template)
-                sent = Sent.create(tokens)
-                parser.stanza.annotate([sent])  # parse this one!
-                res_toks = QuestionAnalyzer().question2template(sent)
-            # --
-            zlog(MyPrettyPrinter.str_fnode(sent, sent.tree_dep.fnode))
-            zlog(f"{sent.get_text()}")
-            zlog(f"{' '.join(res_toks)}")
-    else:
-        final_res = {"topics": {}, "subtopics": {}}
-        tabs = read_tab_file(input_file)
-        for v in tabs:
-            _, _q_toks = parser.parse_template(v['template'], hint=v['subtopic'], quite=True)
-            if v['id'] in SHORTCUTS:
-                sc_toks = SHORTCUTS[v['id']].split()
-                zlog(f"{'Hit' if _q_toks == sc_toks else 'Miss'}: {SHORTCUTS[v['id']]} <-> {_q_toks}")
-                _q_toks = sc_toks  # replace it anyway!
-            _q_toks = _q_toks + ["?"]  # add question mark!
-            v['question'] = postprocess_question(_q_toks)
-            # --
-            final_res['subtopics'][v['id']] = v
-            if v['topic'] not in final_res['topics']:
-                final_res['topics'][v['topic']] = []
-            final_res['topics'][v['topic']].append(v['id'])
-        if output_file:
-            default_json_serializer.to_file(final_res, output_file, indent=4)
+    final_res = {"topics": {}, "subtopics": {}}
+    tabs = read_tab_file(input_file)
+    for v in tabs:
+        _, _q_toks = parser.parse_template(v['template'], hint=v['subtopic'], quite=True)
+        if v['id'] in SHORTCUTS:
+            sc_toks = SHORTCUTS[v['id']].split()
+            logging.info(f"{'Hit' if _q_toks == sc_toks else 'Miss'}: {SHORTCUTS[v['id']]} <-> {_q_toks}")
+            _q_toks = sc_toks  # replace it anyway!
+        _q_toks = _q_toks + ["?"]  # add question mark!
+        v['question'] = postprocess_question(_q_toks)
+        # --
+        final_res['subtopics'][v['id']] = v
+        if v['topic'] not in final_res['topics']:
+            final_res['topics'][v['topic']] = []
+        final_res['topics'][v['topic']].append(v['id'])
+    if output_file:
+        with open(output_file, 'w') as fd:
+            json.dump(final_res, fd, indent=4)
     # --
 
 # python3 parse_topics.py
