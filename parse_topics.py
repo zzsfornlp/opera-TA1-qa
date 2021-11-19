@@ -9,6 +9,7 @@ import logging
 import json
 import stanza
 from nltk.tokenize import TreebankWordTokenizer
+from nltk.tokenize.treebank import TreebankWordDetokenizer
 
 class StanzaParser:
     def __init__(self, stanza_dir: str):
@@ -87,13 +88,59 @@ class TemplateParser:
                 final_tokens = ["Where"] + question_tokens[3:]
             elif question_tokens[2].lower() in ['time', 'date']:
                 final_tokens = ["When"] + question_tokens[3:]
+        # step 5: more templates with simple negation
+        more_templates = self.create_more_templates(sent, final_tokens)
         # --
         if not quite:
             logging.info(f"#-- Parse template: {template} ||| {hint}\n"
                  f"=>raw={raw_tokens}\n=>norm={normed_tokens}\n=>q={question_tokens}\n=>ret={final_tokens}")
         # if debug:
         #     breakpoint()
-        return sent, final_tokens
+        return sent, more_templates
+
+    def simple_negation(self, tokens):
+        # todo: really bad replacements here ...
+        REPL_MAP0 = {
+            "can": "can not", "may": "may not",
+            "is": "isn't", "was": "wasn't", "are": "aren't", "were": "weren't", "will": "won't",
+            "did": "didn't", "does": "doesn't", "do": "don't",
+        }
+        REPL_MAPS = {
+            z: z[:-1] for z in ["transmits", "transfers", "destroys", "prevents", "cures", "shortens", "reduces"]}  # does not
+        REPL_MAPD = {"created": "create", "funded": "fund", "enacted": "enact", "received": "receive"}  # did not
+        # --
+        ret = []
+        hit_neg = False
+        for t in tokens:
+            if not hit_neg:
+                if t in REPL_MAP0:
+                    ret.extend(REPL_MAP0[t].split())
+                    hit_neg = True
+                    continue  # skip this token!
+                elif t in REPL_MAPS:
+                    hit_neg = True
+                    ret.extend("does not".split())
+                elif t in REPL_MAPD:
+                    hit_neg = True
+                    ret.extend("did not".split())
+            # add token
+            if t in REPL_MAPS:
+                ret.extend(REPL_MAPS[t].split())
+            elif t in REPL_MAPD:
+                ret.extend(REPL_MAPD[t].split())
+            else:
+                ret.append(t)
+        # --
+        return ret
+
+    def create_more_templates(self, sent, question_tokens):
+        ret = {
+            "template_pos": sent['text'],
+            "question_pos": question_tokens,
+            "template_neg": self.simple_negation(sent['text']),
+            "question_neg": self.simple_negation(question_tokens),
+        }
+        return ret
 
     def get_chs_lists(self, cur_heads):
         chs = [[] for _ in range(len(cur_heads) + 1)]
@@ -207,6 +254,7 @@ class TemplateParser:
             final_toks[0] = final_toks[0][0].upper() + final_toks[0][1:]
         if len(final_toks) > 0 and final_toks[-1] == '.':
             final_toks = final_toks[:-1]
+        final_toks = final_toks + ["?"]
         return final_toks
 
 # --
@@ -247,13 +295,14 @@ SHORTCUTS = {
 # --
 
 # note: special post-processing!
-def postprocess_question(q_toks):
+def postprocess_tokens(toks):
     ts = []
-    for t in q_toks:
+    for t in toks:
         if t.lower() in [z.lower() for z in ["SARS-CoV-2", "COVID-19", "virus"]]:
-            t = f"{t} or coronavirus"
-        ts.append(t)
-    return " ".join(ts)
+            ts.extend(f"{t} or coronavirus".split())
+        else:
+            ts.append(t)
+    return ts
 
 def main(input_file='', output_file='', stanza_dir=''):
     # --
@@ -265,14 +314,20 @@ def main(input_file='', output_file='', stanza_dir=''):
     parser = TemplateParser(stanza_dir)
     final_res = {"topics": {}, "subtopics": {}}
     tabs = read_tab_file(input_file)
+    detoker = TreebankWordDetokenizer()
     for v in tabs:
-        _, _q_toks = parser.parse_template(v['template'], hint=v['subtopic'], quite=True)
+        sent_parse, seqs = parser.parse_template(v['template'], hint=v['subtopic'], quite=True)
         if v['id'] in SHORTCUTS:
             sc_toks = SHORTCUTS[v['id']].split()
-            logging.info(f"{'Hit' if _q_toks == sc_toks else 'Miss'}: {SHORTCUTS[v['id']]} <-> {_q_toks}")
-            _q_toks = sc_toks  # replace it anyway!
-        _q_toks = _q_toks + ["?"]  # add question mark!
-        v['question'] = postprocess_question(_q_toks)
+            if seqs['question_pos'] != sc_toks + ['?']:
+                logging.warning(f"Unmatched question: {SHORTCUTS[v['id']]} <-> {seqs['question_pos']}")
+                seqs['question_pos'] = sc_toks  # replace it anyway!
+        # postprocessing
+        seqs = {k: postprocess_tokens(v) for k,v in seqs.items()}
+        # --
+        v['question'] = detoker.detokenize(seqs['question_pos'])
+        v['parse'] = sent_parse
+        v['seqs'] = seqs
         # --
         final_res['subtopics'][v['id']] = v
         if v['topic'] not in final_res['topics']:
