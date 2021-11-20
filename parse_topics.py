@@ -105,31 +105,48 @@ class TemplateParser:
             "is": "isn't", "was": "wasn't", "are": "aren't", "were": "weren't", "will": "won't",
             "did": "didn't", "does": "doesn't", "do": "don't",
         }
-        REPL_MAPS = {
-            z: z[:-1] for z in ["transmits", "transfers", "destroys", "prevents", "cures", "shortens", "reduces"]}  # does not
-        REPL_MAPD = {"created": "create", "funded": "fund", "enacted": "enact", "received": "receive"}  # did not
-        # --
-        ret = []
-        hit_neg = False
-        for t in tokens:
-            if not hit_neg:
-                if t in REPL_MAP0:
+        if any(t in REPL_MAP0 for t in tokens):  # simply negate the aux verb is fine
+            ret = []
+            hit_flag = False
+            for t in tokens:
+                if not hit_flag and t in REPL_MAP0:
                     ret.extend(REPL_MAP0[t].split())
-                    hit_neg = True
-                    continue  # skip this token!
-                elif t in REPL_MAPS:
-                    hit_neg = True
-                    ret.extend("does not".split())
-                elif t in REPL_MAPD:
-                    hit_neg = True
-                    ret.extend("did not".split())
-            # add token
-            if t in REPL_MAPS:
-                ret.extend(REPL_MAPS[t].split())
-            elif t in REPL_MAPD:
-                ret.extend(REPL_MAPD[t].split())
+                else:
+                    ret.append(t)
+        else:  # need to parse
+            # find root verb
+            parse_res = self.parser.parse(tokens)
+            root_widx = [widx for widx, (head, deprel) in enumerate(zip(parse_res['head'], parse_res['deprel']))
+                         if head==0 and deprel=='root']
+            if len(root_widx)==0 or parse_res['upos'][root_widx[0]] != 'VERB':
+                all_verb_widxes = [widx for widx, upos in enumerate(parse_res['upos']) if upos=='VERB']
+                if len(all_verb_widxes) > 0:
+                    center_verb_widx = all_verb_widxes[0]
+                    logging.warning(f"Cannot find center verb, fall back to VERBs: {parse_res}")
+                else:  # even cannot find verb??
+                    center_verb_widx = None
+                    logging.warning(f"Cannot find any verbs, simply add 'No': {parse_res}")
+                    return ["No"] + parse_res['text']
             else:
-                ret.append(t)
+                center_verb_widx = root_widx[0]
+            # negate for center-verb
+            center_verb_conjs = [widx for widx, (upos, head, deprel) in enumerate(zip(parse_res['upos'], parse_res['head'], parse_res['deprel'])) if head==(1+center_verb_widx) and deprel=='conj' and upos=='VERB']
+            ret = []
+            for ii, t in enumerate(parse_res['text']):
+                if ii == center_verb_widx:  # add neg & put lemma
+                    cur_lemma = parse_res['lemma'][ii]
+                    if t == cur_lemma:
+                        _extra = "don't"
+                    elif t == cur_lemma + 's' or t == cur_lemma + 'es' or t in ['has']:  # special ones!
+                        _extra = "doesn't"
+                    else:
+                        _extra = "didn't"
+                    ret.append(_extra)
+                    ret.append(parse_res['lemma'][ii])
+                elif ii in center_verb_conjs:  # put lemma
+                    ret.append(parse_res['lemma'][ii])
+                else:  # otherwise simply append
+                    ret.append(t)
         # --
         return ret
 
@@ -325,9 +342,9 @@ def main(input_file='', output_file='', stanza_dir=''):
         # postprocessing
         seqs = {k: postprocess_tokens(v) for k,v in seqs.items()}
         # --
-        v['question'] = detoker.detokenize(seqs['question_pos'])
+        v['seqs'] = {k: detoker.detokenize(v) for k,v in seqs.items()}
+        v['question'] = v['seqs']['question_pos']
         v['parse'] = sent_parse
-        v['seqs'] = seqs
         # --
         final_res['subtopics'][v['id']] = v
         if v['topic'] not in final_res['topics']:
