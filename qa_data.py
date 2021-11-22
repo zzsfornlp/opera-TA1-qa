@@ -352,10 +352,11 @@ class CsrDoc:
         # also include text for easier checking
         x_text = self.id2frame[x]['provenance']['text']
         claim_evt_text = None if claim_evt is None else self.id2frame[claim_evt]['provenance']['text']
-        subtopic = {k:v for k,v in subtopic.items() if k not in ['parse', 'seqs']}  # don't be too verbose!
+        _subtopic = {'@type': 'subtopic'}
+        _subtopic.update({k:v for k,v in subtopic.items() if k not in ['parse', 'seqs']})  # don't be too verbose!
         res = {
             '@id': _id, '@type': 'claim_frame_evidence', 'component': 'opera.cf.qa',
-            'subtopic': subtopic, 'x': x, 'x_score': x_score, 'x_text': x_text,
+            'subtopic': _subtopic, 'x': x, 'x_score': x_score, 'x_text': x_text,
             'claim_evt': claim_evt, 'claim_evt_text': claim_evt_text,
         }
         self.cf_frames.append(res)
