@@ -77,7 +77,9 @@ def main(query_dir: str, output_file: str):
                 continue
             cc['all_ok'] += 1
             added_queries.append(one)
-            _id = one["id"] + "." + str(topic_counts[one['topic']])
+            _id = one["id"]
+            if topic_counts[one['topic']] > 0:
+                _id = one["id"] + "." + str(topic_counts[one['topic']])
             topic_counts[one['topic']] += 1
             fd.write("\t".join([_id, one['subtopic'], one['topic'], one['template']]) + "\n")
     printing(f"Write to {output_file}: {cc}")
