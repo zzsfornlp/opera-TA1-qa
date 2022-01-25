@@ -54,6 +54,23 @@ def read_query(file: str):
     printing(f"Read queries from {file}: {cc}")
     return ret
 
+def norm_template(temp: str):
+    # slightly normalize the template!
+    toks = temp.split()
+    final_toks = []
+    for t in toks:
+        if t != "X" and str.isupper(t[0]) and sum(str.isupper(c) for c in t) == 1:  # not an NE
+            t = str.lower(t[0]) + t[1:]
+        if "/" in t:
+            # exclude aux verbs
+            ts = [z for z in t.split("/") if z not in ["is", "are", "has", "have", "do", "does"]]
+            if len(ts) == 0:
+                ts.append(t.split("/")[-1])  # must keep one!
+            t = " or ".join(ts)
+        final_toks.append(t)
+    ret = " ".join(final_toks)
+    return ret
+
 # --
 def main(query_dir: str, output_file: str):
     # read all the queries
@@ -78,14 +95,17 @@ def main(query_dir: str, output_file: str):
             cc['all_ok'] += 1
             added_queries.append(one)
             _id = one["id"]
+            _temp = norm_template(one['template'])
             if topic_counts[one['topic']] > 0:
                 _id = one["id"] + "." + str(topic_counts[one['topic']])
             topic_counts[one['topic']] += 1
-            fd.write("\t".join([_id, one['subtopic'], one['topic'], one['template']]) + "\n")
+            fd.write("\t".join([_id, one['subtopic'], one['topic'], _temp]) + "\n")
     printing(f"Write to {output_file}: {cc}")
     # --
 
 # --
 # python3 csr/event/io/query2topic.py QDIR OUT
+# python3 q.py AIDA_Phase3_TA3_Evaluation_Queries e.txt
+# python3 q.py AIDA_Phase3_TA3_Dry_Run_Queries e2.txt
 if __name__ == '__main__':
     main(*sys.argv[1:])
